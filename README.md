@@ -1,6 +1,6 @@
 # 榕盛商贸订单管理工作台 - 使用说明
 
-> **当前版本 v3.5.4（2026-11-24）**：**源代码上 GitHub，自动更新改走 GitHub Releases** —— 更新源支持 `github:owner/repo`（可加 `@v3.5.4` 锁版本），程序直接读公开仓库最新 Release 里的 `manifest.json` 与安装包，免登录、无需 token、不消耗 API 配额；旧版本地发布目录源升级后自动切到 GitHub 并留作**离线备用源**（GitHub 不可达时自动回退）。发布侧新增 `tools/publish_github.py`：SHA256 实算校验 → 生成 GitHub 版清单 → 建/复用 Release → 上传 zip + manifest.json → 回读资产与直链核对。详见 §「GitHub 自动更新」。回归 `test_updater_github_v354.py` 23 项；schema 仍 v7、零 DDL 改动，`data/` 原位保留。
+> **当前版本 v3.5.4（2026-11-24）**：**源代码上 GitHub，自动更新改走 GitHub Releases** —— 更新源支持 `github:owner/repo`（可加 `@v3.5.4` 锁版本），程序直接读公开仓库最新 Release 里的 `manifest.json` 与安装包，免登录、无需 token，正常路径不消耗 API 配额；旧版本地发布目录源升级后自动切到 GitHub 并留作**离线备用源**（GitHub 不可达时自动回退）。发布侧新增 `tools/publish_github.py`：SHA256 实算校验 → 生成 GitHub 版清单 → 建/复用 Release → 上传 zip + manifest.json → 回读资产与直链核对。详见 §「GitHub 自动更新」。主站 `github.com` 不可达或系统代理异常时，自动改走 `api.github.com` 资产端点 / 直连重试，两条都不通才用本地备用源。回归 `test_updater_github_v354.py` 28 项；schema 仍 v7、零 DDL 改动，`data/` 原位保留。
 > **v3.5.3（2026-11-19）**：**两段式建单** —— 新增订单只创建订单头，明细不再必填；创建后在订单管理里选中该单，点「录入订单明细」（9 字段表格，一次可存多行）或「导入订单明细」（CSV / Excel，只需「物资名称 + 数量」两列，表头不在首行自动定位）补录。两个动作与「新增订单」同处左侧导航 / 业务菜单 / 主界面快捷栏，选中订单右键也能直达。**修复了旧「导入订单」把一张明细表拆成多张空壳订单、或首行是标题就整表失败的问题**（详见 §订单明细两段式录入 v3.5.3）。
 > **v3.5.2（2026-11-19）**：**导入即自动应用** —— 采购合同导入成功后，若合同明细表全部行高置信匹配、零未匹配、金额对账零差额且数量守恒，物资分配（数量 / 含税单价）直接写入台账，省掉「物资分配 → 保存分配」那一步；任一条件不满足只提示原因、绝不写库。开关在采购合同管理窗口「导入合同」右侧，默认开启、可随时关闭。
 > **v3.5.1（2026-11-18）**：采购合同「物资分配」新增**从合同文档自动匹配** —— 读取合同明细表（物资名称 / 数量 / 含税单价 / 总价），自动勾选对应物资并填入数量与单价，只预填、确认后才写库。
@@ -610,15 +610,18 @@ py -3.13 tools\verify.py --no-exe
 py -3.13 tools\release.py --note "本次改了什么" --skip-build   # 改过源码则去掉 --skip-build
 Copy-Item dist\release\* D:\Programs\ProductSuite_发布\ -Force   # 本地通道：供尚未升级的旧版收更新
 
-# ③ 一键发 GitHub Release（凭据从本机 git 凭据管理器读，不落盘、不回显）
-py -3.13 tools\publish_github.py
+# ③ 发 GitHub Release（推荐云端：GitHub → Actions →「Release (GitHub 自动更新)」→ Run workflow）
+#    runner 内完成 单测门禁 → PyInstaller 打包 → exe 自检 → zip + manifest → Release 资产，
+#    内网上传 95MB 只需数秒，避开本机上行带宽瓶颈；推 v* tag 也会自动触发。
+# 本机兜底（需自行上传 95MB，上行慢时不推荐；凭据从 git 凭据管理器读，不落盘不回显）：
 py -3.13 tools\publish_github.py --dry-run                       # 只校验 SHA256 与打印计划
+py -3.13 tools\publish_github.py
 
 # ④ 推送源码
 git add -A && git commit -m "v3.5.4 …" && git push origin main
 ```
 
-`publish_github.py` 会：按 `manifest.sha256` **实算校验** zip（不一致直接拒绝）→ 把清单里的 `zip` 改写成该 Release 的资产绝对直链（客户端因此无需调 GitHub API）→ 创建或复用 `tag=v<版本>` 的 Release（同名旧资产先删）→ 上传「安装包 zip」+「manifest.json」→ 回读资产大小与固定 tag 直链内容逐项核对。
+`publish_github.py` 会：按 `manifest.sha256` **实算校验** zip（不一致直接拒绝）→ 把清单里的 `zip` 改写成该 Release 的资产绝对直链 → 创建或复用 `tag=v<版本>` 的 Release（清空全部旧资产，含上传中断留下的 `starter` 空壳）→ 以 **ASCII 资产名** `RongshengOrderWorkbench_v<版本>.zip` 上传安装包与 `manifest.json`（GitHub 会吞掉中文名导致直链 404）→ 通过 `api.github.com` 资产端点回读大小与清单内容逐项核对。
 
 清单字段仍是 `version / zip / sha256 / note / date`；本地发布目录那份 `zip` 是相对文件名，GitHub Release 那份 `zip` 是绝对 URL，两条通道互不干扰。
 
@@ -628,6 +631,7 @@ git add -A && git commit -m "v3.5.4 …" && git push origin main
 - 程序内**不内置任何 token**；公开仓库匿名可读，客户端不需要凭据。私有仓库的 Release 资产需要 token，因此发布仓库保持公开。
 - 仓库只含**源代码、设计文档与界面预览**；`data/`（真实 ERP 库与附件）、`dist/`、`build/`、`archive/`、根目录真实询价单 / 图纸 / 销售汇总、迁移台账一律由 `.gitignore` 排除，文档中的客户全称与业务单号已做示例化脱敏。
 - `data/` 不进更新包，升级只换程序文件，业务数据零改动。
+- 清单与安装包都有**双通道**：`github.com` 主站直链优先，不可达时改走 `api.github.com` 资产端点（匿名可读）；系统代理异常时自动直连重试（`ORDER_UPDATER_NO_DIRECT=1` 可禁用）。两条都不通才回退本地备用源。
 
 ### 常见问题
 
@@ -636,6 +640,7 @@ git add -A && git commit -m "v3.5.4 …" && git push origin main
 | 「无法从 GitHub 发布仓库读取更新清单」 | 仓库尚未发布 Release，或 Release 里缺 `manifest.json` 资产；离线时会自动回退本地备用源 |
 | 「更新包下载中断」 | 网络断开 / CDN 超时（读超时 60 秒）；半截包已自动删除，重试即可 |
 | 「SHA256 不匹配」 | 清单与 zip 不是同一批产物；重新执行 `release.py` + `publish_github.py`，切勿手工改 zip |
+| 更新检查长期无提示 | 多为网络到 GitHub 不通；程序依次尝试主站直链 → API 资产 → 本地备用源，可在「设置更新源…」临时改回本地发布目录 |
 | 想回滚到指定版本 | 更新源填 `github:wodeya163/rongsheng-order-workbench@v3.5.4`，锁到该 Release |
 
 ## 🔧 构建与打包

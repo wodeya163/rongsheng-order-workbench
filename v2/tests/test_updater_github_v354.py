@@ -10,7 +10,8 @@ v3.5.4 GitHub Releases 自动更新回归
   ③ download_zip 走 HTTP 分支下载 GitHub 资产 + 进度回调 + SHA256；
   ④ check() 主源失败自动回退备用清单；
   ⑤ updater.json 的 fallback 读写与旧版本地源一次性迁移；
-  ⑥ 设置更新源对话框默认推荐 GitHub 源、切换时保留旧源为备用。
+  ⑥ 设置更新源对话框默认推荐 GitHub 源、切换时保留旧源为备用；
+  ⑦ 代理异常自动直连、主站不可达自动走 api.github.com 资产端点。
 """
 import hashlib
 import json
@@ -299,6 +300,95 @@ class SourceDialogTest(unittest.TestCase):
                          updater.DEFAULT_GITHUB_SOURCE)
         self.assertEqual(updater.load_fallback(self.tmp), legacy)
         dlg.close()
+
+
+class GithubFallbackTest(unittest.TestCase):
+    """v3.5.4 补强：代理抽风自动直连、主站不可达自动走 API 资产端点"""
+
+    def test_24_http_get_falls_back_to_direct_when_proxy_fails(self):
+        resp = _Resp(b"OK")
+        with patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:1"}), \
+                patch.object(updater, "urlopen",
+                             side_effect=OSError("proxy 502")), \
+                patch.object(updater._DIRECT_OPENER, "open",
+                             return_value=resp) as direct:
+            with updater._http_get("https://api.github.com/x") as r:
+                self.assertEqual(r.read(), b"OK")
+            self.assertEqual(direct.call_count, 1)
+
+    def test_25_direct_fallback_can_be_disabled(self):
+        with patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:1",
+                                    "ORDER_UPDATER_NO_DIRECT": "1"}), \
+                patch.object(updater, "urlopen", side_effect=OSError("boom")), \
+                patch.object(updater._DIRECT_OPENER, "open") as direct:
+            with self.assertRaises(OSError):
+                updater._http_get("https://api.github.com/x")
+            direct.assert_not_called()
+
+    def test_26_fetch_manifest_falls_back_to_api_asset(self):
+        rel = {"tag_name": "v9.9.9",
+               "assets": [{"name": "manifest.json", "id": 123}]}
+        calls = []
+
+        def fake(url, timeout=10, accept="*/*"):
+            calls.append((url, accept))
+            if "releases/latest/download/manifest.json" in url:
+                raise OSError("github.com 不可达")
+            if url.endswith("/releases/latest"):
+                return _Resp(json.dumps(rel).encode("utf-8"))
+            if "/releases/assets/123" in url:
+                return _Resp(_manifest_bytes("update.zip"))
+            raise AssertionError(f"意外 URL：{url}")
+
+        with patch.object(updater, "_http_get", side_effect=fake):
+            m = updater.fetch_manifest(GH)
+        self.assertEqual(m["version"], "9.9.9")
+        self.assertEqual(m["_github"]["repo"], REPO)
+        self.assertTrue(any("api.github.com" in u for u, _ in calls))
+        self.assertEqual(calls[-1][1], "application/octet-stream")
+
+    def test_27_download_zip_falls_back_to_api_asset(self):
+        payload = b"ZIPDATA" * 5000
+        digest = hashlib.sha256(payload).hexdigest()
+        name = "RongshengOrderWorkbench_v9.9.9.zip"
+        rel = {"assets": [{"name": name, "id": 999}]}
+        manifest = {
+            "version": "9.9.9",
+            "zip": (f"https://github.com/{OWNER}/{REPO}/releases/download/"
+                    f"v9.9.9/{name}"),
+            "sha256": digest,
+            "_github": {"owner": OWNER, "repo": REPO, "tag": ""},
+        }
+        seen = []
+
+        def fake(url, timeout=60, accept="*/*"):
+            seen.append((url, accept))
+            if "releases/download/" in url:
+                raise OSError("主站超时")
+            if url.endswith("/releases/latest"):
+                return _Resp(json.dumps(rel).encode("utf-8"))
+            if "/releases/assets/999" in url:
+                return _Resp(payload)
+            raise AssertionError(f"意外 URL：{url}")
+
+        tmp = Path(tempfile.mkdtemp(prefix="upd_gh_api_"))
+        try:
+            with patch.object(updater, "_http_get", side_effect=fake):
+                out = updater.download_zip(manifest, tmp)
+            self.assertEqual(updater.sha256_of(out), digest)
+            self.assertTrue(any("api.github.com" in u and "/assets/999" in u
+                                for u, _ in seen))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_28_asset_name_of_decodes_percent_encoding(self):
+        url = updater.github_asset_url(OWNER, REPO,
+                                       "订单管理工作台_v3.5.4.zip", "v3.5.4")
+        self.assertEqual(updater._asset_name_of(url),
+                         "订单管理工作台_v3.5.4.zip")
+        self.assertEqual(updater._asset_name_of(
+            "https://github.com/o/r/releases/download/v1/update.zip"),
+            "update.zip")
 
 
 if __name__ == "__main__":

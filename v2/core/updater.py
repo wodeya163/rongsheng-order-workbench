@@ -46,12 +46,14 @@ v3.5.4 GitHub Releases 通道：
   资产直链（公开仓匿名可读、零 API 配额、程序内不内置 token）；清单里的 zip 由
   tools/publish_github.py 写成该 Release 的资产绝对 URL。旧版本地发布目录源
   自动迁移到 GitHub 并留作 fallback，check() 在主源失败时自动回退。
-  下载带纯 ASCII User-Agent + 60 秒读超时；本机 / UNC / HTTP 源全部保持兼容。
+  下载带纯 ASCII User-Agent + 60 秒读超时；主站不可达时改走 api.github.com
+  资产端点，系统代理异常时自动直连重试；本机 / UNC / HTTP 源全部保持兼容。
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -61,8 +63,8 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import quote, urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import quote, unquote, urljoin, urlparse
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 from .errors import ValidationError
 from .. import EXE_NAME, LEGACY_EXE_NAME, __version__   # v3.4.3 程序集名称单一数据源
@@ -88,6 +90,7 @@ GITHUB_SOURCE_PREFIX = "github:"
 DEFAULT_GITHUB_REPO = "wodeya163/rongsheng-order-workbench"
 DEFAULT_GITHUB_SOURCE = GITHUB_SOURCE_PREFIX + DEFAULT_GITHUB_REPO
 GITHUB_MANIFEST_ASSET = "manifest.json"
+GITHUB_API_BASE = "https://api.github.com"        # 主站不可达时的资产回退通道
 LEGACY_SOURCE_MARKERS = ("ProductSuite_发布",)   # 旧版本地发布目录，升级后自动迁移
 # HTTP 头必须是纯 ASCII（urllib 用 latin-1 编码 header，中文会抛 UnicodeEncodeError）
 GITHUB_USER_AGENT = (f"RongshengOrderWorkbench/{__version__} "
@@ -194,11 +197,63 @@ def github_asset_url(owner: str, repo: str, asset: str, tag: str = "") -> str:
     return base + f"latest/download/{enc}"
 
 
-def _http_get(url: str, timeout: int = HTTP_TIMEOUT):
-    """带 User-Agent 的 GET。GitHub 对无 UA 请求直接 403，header 必须 ASCII"""
-    req = Request(url, headers={"User-Agent": GITHUB_USER_AGENT,
-                                "Accept": "*/*"})
-    return urlopen(req, timeout=timeout)
+_DIRECT_OPENER = build_opener(ProxyHandler({}))
+
+
+def _proxy_configured() -> bool:
+    return any(os.environ.get(k) for k in
+               ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                "ALL_PROXY", "all_proxy"))
+
+
+def _http_get(url: str, timeout: int = HTTP_TIMEOUT, accept: str = "*/*"):
+    """
+    带 User-Agent 的 GET（GitHub 对无 UA 请求直接 403，header 必须 ASCII）。
+    系统代理抽风（沙箱 / 企业代理常见 502 CONNECT tunnel）时自动直连重试一次；
+    正常代理环境优先走代理，只有失败才回退。设 ORDER_UPDATER_NO_DIRECT=1 可禁用回退。
+    """
+    def make_req():
+        return Request(url, headers={"User-Agent": GITHUB_USER_AGENT,
+                                     "Accept": accept})
+
+    try:
+        return urlopen(make_req(), timeout=timeout)
+    except Exception as first:                              # noqa: BLE001
+        if not _proxy_configured() or os.environ.get("ORDER_UPDATER_NO_DIRECT"):
+            raise
+        try:
+            return _DIRECT_OPENER.open(make_req(), timeout=timeout)
+        except Exception:                                   # noqa: BLE001
+            raise first
+
+
+def github_api_release(owner: str, repo: str, tag: str = "") -> Dict[str, Any]:
+    """查 latest / 指定 tag 的 Release（公开仓匿名可读）"""
+    path = (f"{GITHUB_API_BASE}/repos/{owner}/{repo}/releases/"
+            + (f"tags/{quote(tag, safe='')}" if tag else "latest"))
+    with _http_get(path, HTTP_TIMEOUT,
+                   accept="application/vnd.github+json") as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def github_api_asset_url(owner: str, repo: str, asset: str,
+                         tag: str = "") -> str:
+    """
+    按资产名查 asset id，返回 API 资产下载地址。
+    https://github.com 主站在部分网络不可达，而 api.github.com +
+    release-assets.githubusercontent.com 仍可匿名下载，用作回退通道。
+    """
+    rel = github_api_release(owner, repo, tag)
+    for a in rel.get("assets", []):
+        if str(a.get("name") or "") == asset:
+            return (f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
+                    f"/releases/assets/{a['id']}")
+    raise ValidationError(f"Release 里找不到资产：{asset}")
+
+
+def _asset_name_of(url: str) -> str:
+    """从资产 URL 提取文件名（清单 zip 字段是 publish_github.py 写的绝对 URL）"""
+    return unquote(urlparse(url).path.rstrip("/").split("/")[-1])
 
 
 def fetch_manifest(source: str) -> Dict[str, Any]:
@@ -222,11 +277,22 @@ def fetch_manifest(source: str) -> Dict[str, Any]:
         try:
             with _http_get(url) as resp:
                 raw = resp.read()
-        except Exception as exc:                            # noqa: BLE001
-            raise ValidationError(
-                f"无法从 GitHub 发布仓库读取更新清单：{exc}\n"
-                f"请确认 {gh['owner']}/{gh['repo']} 已公开并发布过含 "
-                f"manifest.json 的 Release；离线时会自动回退本地备用源。") from exc
+        except Exception as direct_exc:                     # noqa: BLE001
+            # github.com 主站在部分网络不可达；改走 api.github.com 资产端点
+            # （匿名可读，重定向到 release-assets.githubusercontent.com）。
+            try:
+                api_url = github_api_asset_url(
+                    gh["owner"], gh["repo"], GITHUB_MANIFEST_ASSET, gh["tag"])
+                with _http_get(api_url, HTTP_TIMEOUT,
+                               accept="application/octet-stream") as resp:
+                    raw = resp.read()
+            except Exception as api_exc:                    # noqa: BLE001
+                raise ValidationError(
+                    f"无法从 GitHub 发布仓库读取更新清单：\n"
+                    f"· 主站直链：{direct_exc}\n· API 资产：{api_exc}\n"
+                    f"请确认 {gh['owner']}/{gh['repo']} 已公开并发布过含 "
+                    f"manifest.json 的 Release；离线时会自动回退本地备用源。"
+                ) from direct_exc
     elif _http_url(source):
         with _http_get(source) as resp:
             raw = resp.read()
@@ -262,13 +328,17 @@ def fetch_manifest(source: str) -> Dict[str, Any]:
         if host and not (host == "github.com" or host.endswith(".github.com")
                          or host.endswith("githubusercontent.com")):
             raise ValidationError(f"GitHub 清单里的更新包地址不在 GitHub 域名下：{host}")
-    return {
+    result = {
         "version": str(data["version"]).strip(),
         "zip": zip_ref,
         "sha256": str(data["sha256"]).strip().lower(),
         "note": str(data.get("note") or "").strip(),
         "date": str(data.get("date") or "").strip(),
     }
+    if gh is not None:
+        # download_zip() 主站直链失败时据此回退到 API 资产端点
+        result["_github"] = dict(gh)
+    return result
 
 
 def parse_version(text: str) -> Tuple[int, ...]:
@@ -336,8 +406,8 @@ def download_zip(manifest: Dict[str, Any], dest_dir: Path,
     if _http_url(zip_ref):
         # v3.5.4：GitHub Release 资产会 302 到 CDN；带 UA + 60 秒读超时，
         # 中途断线删掉半截包并给出可读提示（避免只报「SHA256 不匹配」）。
-        try:
-            with _http_get(zip_ref, DOWNLOAD_TIMEOUT) as resp, \
+        def _fetch(u: str, accept: str = "*/*") -> None:
+            with _http_get(u, DOWNLOAD_TIMEOUT, accept=accept) as resp, \
                     open(target, "wb") as f:
                 total = int(resp.headers.get("Content-Length") or 0)
                 done = 0
@@ -349,13 +419,32 @@ def download_zip(manifest: Dict[str, Any], dest_dir: Path,
                     done += len(chunk)
                     if progress:
                         progress(done, total or done)
-        except Exception as exc:                        # noqa: BLE001
+
+        def _drop_partial(exc: Exception, api_msg: str = "") -> ValidationError:
             try:
                 target.unlink()
             except OSError:
                 pass
-            raise ValidationError(
-                f"更新包下载中断：{exc}\n已删除不完整文件，请检查网络后重试。") from exc
+            detail = (f"· 主站直链：{exc}\n· API 资产：{api_msg}"
+                      if api_msg else str(exc))
+            return ValidationError(
+                f"更新包下载中断：\n{detail}\n"
+                "已删除不完整文件，请检查网络后重试。")
+
+        try:
+            _fetch(zip_ref)
+        except Exception as direct_exc:                 # noqa: BLE001
+            gh = manifest.get("_github")
+            if not isinstance(gh, dict):
+                raise _drop_partial(direct_exc) from direct_exc
+            # github.com 主站在部分网络不可达 → 按资产名查 API 资产端点重试
+            try:
+                api_url = github_api_asset_url(
+                    gh["owner"], gh["repo"], _asset_name_of(zip_ref),
+                    str(gh.get("tag") or ""))
+                _fetch(api_url, "application/octet-stream")
+            except Exception as api_exc:                # noqa: BLE001
+                raise _drop_partial(direct_exc, str(api_exc)) from direct_exc
     else:
         from . import cloudfile
         src = Path(cloudfile.ensure_readable(zip_ref))   # v3.1.1 云盘更新包

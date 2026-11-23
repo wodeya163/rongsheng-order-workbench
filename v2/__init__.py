@@ -183,6 +183,7 @@
         发布侧新增 tools/publish_github.py：校验 SHA256 → 生成 GitHub 版清单 →
         创建/复用 Release → 上传 zip + manifest.json → 回读资产与直链核对。
         顺手修复「首次设置更新源」作用域缺 updater 导入的 NameError。
+        主站不可达时自动改走 api.github.com 资产端点，代理异常自动直连重试。
         schema 仍 v7、零 DDL 改动，data/ 原位保留。
 
 设计文档：docs/系统框架设计_v2.2.md

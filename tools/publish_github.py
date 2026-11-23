@@ -259,13 +259,19 @@ def main() -> int:
         got = assets.get(name, {}).get("size")
         print(f"  回读 {name}: {got} 字节（期望 {size}）")
         ok = ok and got == size
-    fixed_url = updater.github_asset_url(owner, repo, MANIFEST_ASSET, tag)
-    # 刚上传完的资产直链可能要等 CDN 生效，短重试几次再判定失败
+    # 回读走 api.github.com 资产端点：不依赖 github.com 主站可达，
+    # 也不受 latest/download 直链的 CDN 生效延迟影响。
+    mid = assets.get(MANIFEST_ASSET, {}).get("id")
+    fixed_url = (f"{API_BASE}/repos/{owner}/{repo}/releases/assets/{mid}"
+                 if mid else updater.github_asset_url(
+                     owner, repo, MANIFEST_ASSET, tag))
     remote: Optional[Dict[str, Any]] = None
     for attempt in range(4):
         try:
-            req = Request(fixed_url, headers={"User-Agent": UA,
-                                              "Cache-Control": "no-cache"})
+            req = Request(fixed_url, headers={
+                "User-Agent": UA,
+                "Accept": "application/octet-stream",
+                "Cache-Control": "no-cache"})
             with _open(req, 60) as resp:
                 remote = json.loads(resp.read().decode("utf-8"))
             break
