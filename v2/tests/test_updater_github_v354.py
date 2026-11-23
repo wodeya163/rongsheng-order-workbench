@@ -161,7 +161,10 @@ class GithubManifestTest(unittest.TestCase):
                 _manifest_bytes("update.zip", "1.2.3"))
             res = updater.fetch_manifest(str(tmp / "manifest.json"))
             self.assertEqual(res["version"], "1.2.3")
-            self.assertEqual(res["zip"], str(tmp / "update.zip"))
+            # Windows 临时目录可能返回 8.3 短名（RUNNER~1），而 resolve() 给长名；
+            # 比较规范化后的路径，不做字符串相等。
+            self.assertEqual(Path(res["zip"]).resolve(),
+                             (tmp / "update.zip").resolve())
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
