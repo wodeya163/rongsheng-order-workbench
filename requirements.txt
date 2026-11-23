@@ -1,0 +1,16 @@
+# 运行期依赖（v2.8）
+# 说明：程序按「单机单用户」设计，全部依赖都可离线安装；
+#       PySide6 是 GUI 必需，其余是文档识别（图片/表格/PDF/Word）通道所需。
+PySide6>=6.6
+openpyxl>=3.1          # xlsx 读写
+xlrd>=2.0              # 旧 .xls 读取（可选，缺失时给可读提示）
+python-docx>=1.1       # Word 读取 + 生产排产审批单生成
+pdfplumber>=0.11       # PDF 抽表
+pypdfium2>=4.20        # PDF 渲染（OCR 前置）
+pdfminer.six>=20231228 # pdfplumber 依赖，显式声明便于离线部署
+pytesseract>=0.3.10    # 图片 OCR
+Pillow>=10.0           # 图片处理
+
+# 打包 / 测试（开发机才需要）
+pyinstaller>=6.0
+pytest>=8.0

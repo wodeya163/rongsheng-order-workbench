@@ -1,0 +1,49 @@
+name: CI
+
+# v3.5.4：GitHub 仓库只做「装依赖 → 语法 → 全量单测」。
+# 打包（PyInstaller onedir / 95MB zip）仍在本机 Windows 执行 tools/release.py +
+# tools/publish_github.py，CI 不产出 exe，也不碰 data/。
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 语法检查
+        run: python -m compileall -q app v2 tools
+
+      # tests/test_core.py 是自带 sys.exit 断言的独立脚本，不能被 pytest 收集
+      - name: v2 单元测试（PySide6 / 服务层 / UI 冒烟）
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest v2/tests -q
+
+      - name: v1.5 回归（独立脚本 36 项）
+        run: python tests/test_core.py
+
+      - name: 上传失败现场
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-artifacts
+          path: |
+            .pytest_cache
+            logs/
+          if-no-files-found: ignore

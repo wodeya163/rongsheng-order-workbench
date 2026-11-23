@@ -1,0 +1,11 @@
+# 统一仓库内换行为 LF；二进制资源显式声明，避免被当文本改写
+* text=auto eol=lf
+
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.xlsx binary
+*.xls  binary
+*.dwg  binary
+*.db   binary
