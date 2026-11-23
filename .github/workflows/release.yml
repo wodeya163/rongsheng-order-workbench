@@ -22,6 +22,10 @@ jobs:
   build-and-publish:
     runs-on: windows-latest
     timeout-minutes: 45
+    # runner 的 stdout 是 cp1252；测试脚本、build_v2.py、release.py 都会打印中文
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: 1
     steps:
       - uses: actions/checkout@v4
 

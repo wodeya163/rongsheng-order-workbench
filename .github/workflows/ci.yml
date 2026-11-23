@@ -13,6 +13,10 @@ jobs:
   test:
     runs-on: windows-latest
     timeout-minutes: 25
+    # runner 的 stdout 是 cp1252，v1.5 回归脚本打印中文会 UnicodeEncodeError
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: 1
     steps:
       - uses: actions/checkout@v4
 
